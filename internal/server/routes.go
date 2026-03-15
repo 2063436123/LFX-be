@@ -29,7 +29,7 @@ func (s *Server) registerRoutes(e *core.ServeEvent) {
 	publicGroup.GET("/health", func(re *core.RequestEvent) error {
 		return re.JSON(http.StatusOK, map[string]any{"status": "ok"})
 	})
-	
+
 	// 登录端点使用更严格的速率限制
 	loginLimiter := s.getAuthLoginLimiter()
 	publicGroup.POST("/auth/login", func(re *core.RequestEvent) error {
@@ -50,9 +50,9 @@ func (s *Server) registerRoutes(e *core.ServeEvent) {
 	authGroup.POST("/customers/create", s.handleCreateCustomer)
 	authGroup.POST("/customers/patch", s.handlePatchCustomer)
 	authGroup.POST("/customers/delete", s.handleDeleteCustomer)
-        authGroup.POST("/products/create", s.handleCreateProduct)
-        authGroup.POST("/products/patch", s.handlePatchProduct)
-        authGroup.POST("/products/delete", s.handleDeleteProduct)
+	authGroup.POST("/products/create", s.handleCreateProduct)
+	authGroup.POST("/products/patch", s.handlePatchProduct)
+	authGroup.POST("/products/delete", s.handleDeleteProduct)
 	authGroup.POST("/recharges/create", s.handleCreateRecharge)
 	authGroup.POST("/consumes/create", s.handleCreateConsume)
 	authGroup.POST("/logs/create", s.handleCreateLog)
@@ -74,26 +74,21 @@ func (s *Server) handleAuthLogin(e *core.RequestEvent) error {
 	}
 
 	// 统一认证错误响应，防止用户枚举
-	invalidCredentialsErr := e.JSON(http.StatusUnauthorized, map[string]string{"error": "invalid credentials"})
-
-	log.Printf("[DEBUG] Login attempt: identity=%s", req.Identity)
+	invalidCredentials := func() error {
+		return e.JSON(http.StatusUnauthorized, map[string]string{"error": "invalid credentials"})
+	}
 
 	user, err := s.findUserByIdentity(req.Identity)
 	if err != nil {
-		log.Printf("[DEBUG] findUserByIdentity error: %v", err)
-		return invalidCredentialsErr
+		return invalidCredentials()
 	}
 	if user == nil {
-		log.Printf("[DEBUG] findUserByIdentity returned nil user")
-		return invalidCredentialsErr
+		return invalidCredentials()
 	}
-	log.Printf("[DEBUG] User found: id=%s, username=%s", user.Id, user.GetString("username"))
 
 	if !user.ValidatePassword(req.Password) {
-		log.Printf("[DEBUG] Password validation failed")
-		return invalidCredentialsErr
+		return invalidCredentials()
 	}
-	log.Printf("[DEBUG] Password validation succeeded")
 	token, err := user.NewAuthToken()
 	if err != nil {
 		return e.JSON(http.StatusInternalServerError, map[string]string{"error": "internal error"})

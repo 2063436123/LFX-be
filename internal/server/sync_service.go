@@ -16,32 +16,66 @@ type SyncService struct {
 	app core.App
 }
 
+const pullPageSize = 500
+
 func NewSyncService(app core.App) *SyncService {
 	return &SyncService{app: app}
 }
 
 func (s *SyncService) PullChanges(e *core.RequestEvent) (*PullResponse, error) {
+	snapshotTime := queryTime(e.Request, "until")
+	if snapshotTime == "" {
+		snapshotTime = time.Now().UTC().Format(time.RFC3339)
+	}
+
 	res := &PullResponse{
-		ServerTime: time.Now().UTC().Format(time.RFC3339),
+		ServerTime: snapshotTime,
 	}
 
 	var err error
-	if res.Customers, err = s.listCustomersSince(queryTime(e.Request, "customersSince")); err != nil {
+	if res.Customers, res.NextCursors.Customers, err = s.listCustomersSince(
+		queryTime(e.Request, "customersSince"),
+		queryTime(e.Request, "customersCursor"),
+		snapshotTime,
+	); err != nil {
 		return nil, err
 	}
-	if res.Recharges, err = s.listRecordsSince("recharge_records", queryTime(e.Request, "rechargesSince")); err != nil {
+	if res.Recharges, res.NextCursors.Recharges, err = s.listRecordsSince(
+		"recharge_records",
+		queryTime(e.Request, "rechargesSince"),
+		queryTime(e.Request, "rechargesCursor"),
+		snapshotTime,
+	); err != nil {
 		return nil, err
 	}
-	if res.Consumes, err = s.listRecordsSince("consume_records", queryTime(e.Request, "consumesSince")); err != nil {
+	if res.Consumes, res.NextCursors.Consumes, err = s.listRecordsSince(
+		"consume_records",
+		queryTime(e.Request, "consumesSince"),
+		queryTime(e.Request, "consumesCursor"),
+		snapshotTime,
+	); err != nil {
 		return nil, err
 	}
-	if res.Logs, err = s.listRecordsSince("logs", queryTime(e.Request, "logsSince")); err != nil {
+	if res.Logs, res.NextCursors.Logs, err = s.listRecordsSince(
+		"logs",
+		queryTime(e.Request, "logsSince"),
+		queryTime(e.Request, "logsCursor"),
+		snapshotTime,
+	); err != nil {
 		return nil, err
 	}
-	if res.Conflicts, err = s.listConflictsSince(queryTime(e.Request, "conflictsSince")); err != nil {
+	if res.Conflicts, res.NextCursors.Conflicts, err = s.listConflictsSince(
+		queryTime(e.Request, "conflictsSince"),
+		queryTime(e.Request, "conflictsCursor"),
+		snapshotTime,
+	); err != nil {
 		return nil, err
 	}
-	if res.Products, err = s.listProductsSince(queryTime(e.Request, "productsSince"), 1, 1000); err != nil {
+	if res.Products, res.NextCursors.Products, err = s.listProductsSince(
+		queryTime(e.Request, "productsSince"),
+		queryTime(e.Request, "productsCursor"),
+		snapshotTime,
+	); err != nil {
 		return nil, err
 	}
 
@@ -400,62 +434,91 @@ func (s *SyncService) createConflict(app core.App, customer *core.Record, req Cu
 	return record, nil
 }
 
-func (s *SyncService) listCustomersSince(since string) ([]CustomerDTO, error) {
-	filter := ""
-	args := dbx.Params{}
-	if since != "" {
-		filter = "changedAt >= {:since}"
-		args["since"] = since
-	}
-	return collectCustomers(s.app, filter, args)
-}
-
-func (s *SyncService) listRecordsSince(collection, since string) ([]RecordDTO, error) {
-	filter := ""
-	args := dbx.Params{}
-	if since != "" {
-		filter = "changedAt >= {:since}"
-		args["since"] = since
-	}
-	records, err := s.app.FindRecordsByFilter(collection, filter, "", 500, 0, args)
+func (s *SyncService) listCustomersSince(since, cursor, until string) ([]CustomerDTO, string, error) {
+	records, nextCursor, err := collectRecordsPage(s.app, "customers", since, cursor, until)
 	if err != nil {
-		return nil, err
-	}
-	out := make([]RecordDTO, 0, len(records))
-	for _, record := range records {
-		out = append(out, recordDTO(record, collection))
-	}
-	return out, nil
-}
-
-func (s *SyncService) listConflictsSince(since string) ([]ConflictDTO, error) {
-	filter := ""
-	args := dbx.Params{}
-	if since != "" {
-		filter = "changedAt >= {:since}"
-		args["since"] = since
-	}
-	records, err := s.app.FindRecordsByFilter("sync_conflicts", filter, "", 500, 0, args)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]ConflictDTO, 0, len(records))
-	for _, record := range records {
-		out = append(out, conflictDTO(record))
-	}
-	return out, nil
-}
-
-func collectCustomers(app core.App, filter string, args dbx.Params) ([]CustomerDTO, error) {
-	records, err := app.FindRecordsByFilter("customers", filter, "", 500, 0, args)
-	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	out := make([]CustomerDTO, 0, len(records))
 	for _, record := range records {
 		out = append(out, customerDTO(record))
 	}
-	return out, nil
+	return out, nextCursor, nil
+}
+
+func (s *SyncService) listRecordsSince(collection, since, cursor, until string) ([]RecordDTO, string, error) {
+	records, nextCursor, err := collectRecordsPage(s.app, collection, since, cursor, until)
+	if err != nil {
+		return nil, "", err
+	}
+	out := make([]RecordDTO, 0, len(records))
+	for _, record := range records {
+		out = append(out, recordDTO(record, collection))
+	}
+	return out, nextCursor, nil
+}
+
+func (s *SyncService) listConflictsSince(since, cursor, until string) ([]ConflictDTO, string, error) {
+	records, nextCursor, err := collectRecordsPage(s.app, "sync_conflicts", since, cursor, until)
+	if err != nil {
+		return nil, "", err
+	}
+	out := make([]ConflictDTO, 0, len(records))
+	for _, record := range records {
+		out = append(out, conflictDTO(record))
+	}
+	return out, nextCursor, nil
+}
+
+func collectRecordsPage(app core.App, collection, since, cursor, until string) ([]*core.Record, string, error) {
+	filter, args, err := buildPullFilter(since, cursor, until)
+	if err != nil {
+		return nil, "", err
+	}
+	records, err := app.FindRecordsByFilter(collection, filter, "+changedAt,+id", pullPageSize, 0, args)
+	if err != nil {
+		return nil, "", err
+	}
+	nextCursor := ""
+	if len(records) == pullPageSize {
+		nextCursor = encodePullCursor(records[len(records)-1])
+	}
+	return records, nextCursor, nil
+}
+
+func buildPullFilter(since, cursor, until string) (string, dbx.Params, error) {
+	args := dbx.Params{}
+	clauses := make([]string, 0, 3)
+	if since != "" {
+		clauses = append(clauses, "changedAt >= {:since}")
+		args["since"] = since
+	}
+	if until != "" {
+		clauses = append(clauses, "changedAt <= {:until}")
+		args["until"] = until
+	}
+	if cursor != "" {
+		changedAt, id, err := decodePullCursor(cursor)
+		if err != nil {
+			return "", nil, err
+		}
+		clauses = append(clauses, "(changedAt > {:cursorChangedAt} || (changedAt = {:cursorChangedAt} && id > {:cursorId}))")
+		args["cursorChangedAt"] = changedAt
+		args["cursorId"] = id
+	}
+	return strings.Join(clauses, " && "), args, nil
+}
+
+func encodePullCursor(record *core.Record) string {
+	return record.GetString("changedAt") + "|" + record.Id
+}
+
+func decodePullCursor(cursor string) (string, string, error) {
+	parts := strings.SplitN(strings.TrimSpace(cursor), "|", 2)
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return "", "", errors.New("invalid pull cursor")
+	}
+	return parts[0], parts[1], nil
 }
 
 func customerDTO(record *core.Record) CustomerDTO {
@@ -721,26 +784,16 @@ func (s *SyncService) DeleteProduct(req ProductDeleteRequest) (*PushResult, erro
 	return &PushResult{Status: "ok", Product: &dto}, nil
 }
 
-func (s *SyncService) listProductsSince(since string, page, pageSize int) ([]ProductDTO, error) {
-	filter := ""
-	args := dbx.Params{}
-	if since != "" {
-		filter = "changedAt >= {:since}"
-		args["since"] = since
-	}
-	return collectProducts(s.app, filter, args, page, pageSize)
-}
-
-func collectProducts(app core.App, filter string, args dbx.Params, page, pageSize int) ([]ProductDTO, error) {
-	records, err := app.FindRecordsByFilter("products", filter, "", pageSize, (page-1)*pageSize, args)
+func (s *SyncService) listProductsSince(since, cursor, until string) ([]ProductDTO, string, error) {
+	records, nextCursor, err := collectRecordsPage(s.app, "products", since, cursor, until)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	out := make([]ProductDTO, 0, len(records))
 	for _, record := range records {
 		out = append(out, productDTO(record))
 	}
-	return out, nil
+	return out, nextCursor, nil
 }
 
 func (s *SyncService) findProduct(clientID string, includeDeleted bool) (*core.Record, error) {
@@ -795,6 +848,8 @@ func productDTO(record *core.Record) ProductDTO {
 		Name:          record.GetString("name"),
 		Price:         record.GetFloat("price"),
 		ServerVersion: record.GetInt("serverVersion"),
+		Deleted:       record.GetBool("deleted"),
+		DeletedAt:     record.GetString("deletedAt"),
 		ChangedAt:     record.GetString("changedAt"),
 		CreatedAt:     record.GetString("createdAt"),
 		UpdatedAt:     record.GetString("changedAt"),

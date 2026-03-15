@@ -52,6 +52,14 @@ func ensureAuthCollection(app core.App, name string) error {
 	if !col.IsAuth() {
 		return fmt.Errorf("collection %q is not an auth collection", name)
 	}
+	col.AddIndex("idx_users_username_unique", true, "username", "username != ''")
+	col.PasswordAuth = core.PasswordAuthConfig{
+		Enabled:        true,
+		IdentityFields: []string{"email", "username"},
+	}
+	if err := app.Save(col); err != nil {
+		return err
+	}
 	return nil
 }
 

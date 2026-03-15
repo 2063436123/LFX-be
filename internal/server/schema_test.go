@@ -28,6 +28,17 @@ func TestEnsureAuthCollectionUsesPocketBaseUsersCollection(t *testing.T) {
 	if !col.IsAuth() {
 		t.Fatalf("expected %q to be auth collection", syncAuthCollectionName)
 	}
+	if got := col.GetIndex("idx_users_username_unique"); got == "" {
+		t.Fatal("expected unique username index to be configured on auth collection")
+	}
+	if !col.PasswordAuth.Enabled {
+		t.Fatal("expected password auth to be enabled on auth collection")
+	}
+	if len(col.PasswordAuth.IdentityFields) != 2 ||
+		col.PasswordAuth.IdentityFields[0] != "email" ||
+		col.PasswordAuth.IdentityFields[1] != "username" {
+		t.Fatalf("unexpected identity fields: %#v", col.PasswordAuth.IdentityFields)
+	}
 }
 
 func TestEnsureCollectionSyncsIndexesForExistingCollection(t *testing.T) {

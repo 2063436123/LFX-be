@@ -1,4 +1,5 @@
 package server
+
 import (
 	"errors"
 	"strings"
@@ -62,13 +63,23 @@ type ConflictDTO struct {
 }
 
 type PullResponse struct {
-	ServerTime string        `json:"serverTime"`
-	Customers []CustomerDTO `json:"customers"`
-	Products  []ProductDTO   `json:"products"`
-	Recharges  []RecordDTO   `json:"recharges"`
-	Consumes   []RecordDTO   `json:"consumes"`
-	Logs       []RecordDTO   `json:"logs"`
-	Conflicts  []ConflictDTO `json:"conflicts"`
+	ServerTime  string          `json:"serverTime"`
+	Customers   []CustomerDTO   `json:"customers"`
+	Products    []ProductDTO    `json:"products"`
+	Recharges   []RecordDTO     `json:"recharges"`
+	Consumes    []RecordDTO     `json:"consumes"`
+	Logs        []RecordDTO     `json:"logs"`
+	Conflicts   []ConflictDTO   `json:"conflicts"`
+	NextCursors PullNextCursors `json:"nextCursors"`
+}
+
+type PullNextCursors struct {
+	Customers string `json:"customers"`
+	Products  string `json:"products"`
+	Recharges string `json:"recharges"`
+	Consumes  string `json:"consumes"`
+	Logs      string `json:"logs"`
+	Conflicts string `json:"conflicts"`
 }
 
 type RecordDTO struct {
@@ -158,7 +169,7 @@ type PushResult struct {
 	Status   string       `json:"status"`
 	Customer *CustomerDTO `json:"customer,omitempty"`
 	Conflict *ConflictDTO `json:"conflict,omitempty"`
-        Product  *ProductDTO  `json:"product,omitempty"`
+	Product  *ProductDTO  `json:"product,omitempty"`
 	Record   *RecordDTO   `json:"record,omitempty"`
 }
 
@@ -204,6 +215,8 @@ type ProductDTO struct {
 	Name          string        `json:"name"`
 	Price         float64       `json:"price"`
 	ServerVersion int           `json:"serverVersion"`
+	Deleted       bool          `json:"deleted"`
+	DeletedAt     string        `json:"deletedAt"`
 	ChangedAt     string        `json:"changedAt"`
 	CreatedAt     string        `json:"createdAt"`
 	UpdatedAt     string        `json:"updatedAt"`
