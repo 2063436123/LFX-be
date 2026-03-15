@@ -17,6 +17,9 @@ func (s *SyncService) EnsureCollections(app core.App) error {
 	if err := ensureCollection(app, buildCustomersCollection(requiredAuth)); err != nil {
 		return fmt.Errorf("customers collection: %w", err)
 	}
+	if err := ensureCollection(app, buildProductsCollection(requiredAuth)); err != nil {
+		return fmt.Errorf("products collection: %w", err)
+	}
 	if err := ensureCollection(app, buildRechargeCollection(requiredAuth)); err != nil {
 		return fmt.Errorf("recharge_records collection: %w", err)
 	}
@@ -101,6 +104,31 @@ func buildCustomersCollection(rule *string) *core.Collection {
 		&core.TextField{Name: "updatedByAdminId"},
 	)
 	col.AddIndex("idx_customers_client_id_unique", true, "clientId", "")
+	return col
+}
+
+func buildProductsCollection(rule *string) *core.Collection {
+	minPrice := 0.0
+	minVersion := 0.0
+	col := core.NewBaseCollection("products")
+	col.ListRule = rule
+	col.ViewRule = rule
+	col.CreateRule = rule
+	col.UpdateRule = rule
+	col.DeleteRule = rule
+	col.Fields.Add(
+		&core.TextField{Name: "clientId", Required: true},
+		&core.TextField{Name: "name", Required: true},
+		&core.NumberField{Name: "price", Required: true, Min: &minPrice},
+		&core.NumberField{Name: "serverVersion", Required: true, OnlyInt: true, Min: &minVersion},
+		&core.BoolField{Name: "deleted"},
+		&core.TextField{Name: "deletedAt"},
+		&core.TextField{Name: "createdAt", Required: true},
+		&core.TextField{Name: "changedAt", Required: true},
+		&core.TextField{Name: "updatedByDeviceId"},
+		&core.TextField{Name: "updatedByAdminId"},
+	)
+	col.AddIndex("idx_products_client_id_unique", true, "clientId", "")
 	return col
 }
 

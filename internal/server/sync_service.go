@@ -41,6 +41,9 @@ func (s *SyncService) PullChanges(e *core.RequestEvent) (*PullResponse, error) {
 	if res.Conflicts, err = s.listConflictsSince(queryTime(e.Request, "conflictsSince")); err != nil {
 		return nil, err
 	}
+	if res.Products, err = s.listProductsSince(queryTime(e.Request, "productsSince"), 1, 1000); err != nil {
+		return nil, err
+	}
 
 	return res, nil
 }
@@ -564,4 +567,290 @@ func queryTime(r *http.Request, key string) string {
 
 func (req CustomerCreateRequest) RemoteID() string {
 	return ""
+}
+
+// ========== Product 相关方法 ==========
+
+func (s *SyncService) CreateProduct(req ProductCreateRequest) (*PushResult, error) {
+	if strings.TrimSpace(req.ClientID) == "" {
+		return nil, errors.New("clientId is required")
+	}
+	if err := req.Fields.Validate(); err != nil {
+		return nil, err
+	}
+	record, err := s.findProduct(req.ClientID, false)
+	if err == nil && record != nil {
+		dto := productDTO(record)
+		return &PushResult{Status: "ok", Product: &dto}, nil
+	}
+	var out *core.Record
+	err = s.app.RunInTransaction(func(txApp core.App) error {
+		col, err := txApp.FindCollectionByNameOrId("products")
+		if err != nil {
+			return err
+		}
+		now := time.Now().UTC().Format(time.RFC3339)
+		record := core.NewRecord(col)
+		record.Set("clientId", req.ClientID)
+		record.Set("name", strings.TrimSpace(req.Fields.Name))
+		record.Set("price", req.Fields.Price)
+		record.Set("serverVersion", 1)
+		record.Set("changedAt", now)
+		record.Set("createdAt", now)
+		record.Set("updatedByDeviceId", req.DeviceID)
+		record.Set("updatedByAdminId", req.AdminID)
+		if err := txApp.Save(record); err != nil {
+			return err
+		}
+		out = record
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	dto := productDTO(out)
+	return &PushResult{Status: "ok", Product: &dto}, nil
+}
+
+func (s *SyncService) PatchProduct(req ProductPatchRequest) (*PushResult, error) {
+	record, err := s.findProduct(req.ClientID, false)
+	if err != nil {
+		return nil, err
+	}
+	for field := range req.Changes {
+		if !ValidateProductChangeField(field) {
+			return nil, fmt.Errorf("cannot modify field: %s", field)
+		}
+	}
+	var conflicts []*ConflictDTO
+	err = s.app.RunInTransaction(func(txApp core.App) error {
+		current, err := resolveProduct(txApp, req.RemoteID, req.ClientID, false)
+		if err != nil {
+			return err
+		}
+		changedAny := false
+		hasConflict := false
+		for field, rawNew := range req.Changes {
+			baseValue, ok := baseFieldValueProduct(req.BaseSnapshot, field)
+			if !ok {
+				continue
+			}
+			newValue := fmt.Sprintf("%v", rawNew)
+			var currentValue string
+			if field == "price" {
+				currentValue = strconv.FormatFloat(current.GetFloat(field), 'f', -1, 64)
+			} else {
+				currentValue = current.GetString(field)
+			}
+			if currentValue != baseValue && currentValue != newValue {
+				conflictRecord, err := s.createProductConflict(txApp, current, req, field, baseValue, newValue, currentValue)
+				if err != nil {
+					return err
+				}
+				dto := conflictDTO(conflictRecord)
+				conflicts = append(conflicts, &dto)
+				hasConflict = true
+			}
+		}
+		if hasConflict {
+			return nil
+		}
+		for field, rawNew := range req.Changes {
+			if field == "name" {
+				current.Set(field, fmt.Sprintf("%v", rawNew))
+				changedAny = true
+			} else if field == "price" {
+				current.Set(field, toFloat(rawNew, current.GetFloat(field)))
+				changedAny = true
+			}
+		}
+		if changedAny {
+			now := time.Now().UTC().Format(time.RFC3339)
+			current.Set("serverVersion", current.GetInt("serverVersion")+1)
+			current.Set("changedAt", now)
+			current.Set("updatedByDeviceId", req.DeviceID)
+			current.Set("updatedByAdminId", req.AdminID)
+			if err := txApp.Save(current); err != nil {
+				return err
+			}
+		}
+		record = current
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	product := productDTO(record)
+	if len(conflicts) > 0 {
+		return &PushResult{Status: "conflict", Product: &product, Conflict: conflicts[0]}, nil
+	}
+	return &PushResult{Status: "ok", Product: &product}, nil
+}
+
+func (s *SyncService) DeleteProduct(req ProductDeleteRequest) (*PushResult, error) {
+	record, err := s.findProduct(req.ClientID, true)
+	if err != nil {
+		return nil, err
+	}
+	err = s.app.RunInTransaction(func(txApp core.App) error {
+		current, err := resolveProduct(txApp, req.RemoteID, req.ClientID, true)
+		if err != nil {
+			return err
+		}
+		if current.GetBool("deleted") {
+			record = current
+			return nil
+		}
+		current.Set("deleted", true)
+		now := time.Now().UTC().Format(time.RFC3339)
+		current.Set("deletedAt", now)
+		current.Set("changedAt", now)
+		current.Set("serverVersion", current.GetInt("serverVersion")+1)
+		current.Set("updatedByDeviceId", req.DeviceID)
+		current.Set("updatedByAdminId", req.AdminID)
+		if err := txApp.Save(current); err != nil {
+			return err
+		}
+		record = current
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	dto := productDTO(record)
+	return &PushResult{Status: "ok", Product: &dto}, nil
+}
+
+func (s *SyncService) listProductsSince(since string, page, pageSize int) ([]ProductDTO, error) {
+	filter := ""
+	args := dbx.Params{}
+	if since != "" {
+		filter = "changedAt >= {:since}"
+		args["since"] = since
+	}
+	return collectProducts(s.app, filter, args, page, pageSize)
+}
+
+func collectProducts(app core.App, filter string, args dbx.Params, page, pageSize int) ([]ProductDTO, error) {
+	records, err := app.FindRecordsByFilter("products", filter, "", pageSize, (page-1)*pageSize, args)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]ProductDTO, 0, len(records))
+	for _, record := range records {
+		out = append(out, productDTO(record))
+	}
+	return out, nil
+}
+
+func (s *SyncService) findProduct(clientID string, includeDeleted bool) (*core.Record, error) {
+	if strings.TrimSpace(clientID) == "" {
+		return nil, errors.New("clientId is required")
+	}
+	collection, err := s.app.FindCollectionByNameOrId("products")
+	if err != nil {
+		return nil, err
+	}
+	filter := "clientId={:clientId}"
+	args := dbx.Params{"clientId": clientID}
+	if !includeDeleted {
+		filter += " && deleted=false"
+	}
+	return s.app.FindFirstRecordByFilter(collection, filter, args)
+}
+
+func resolveProduct(app core.App, remoteID, clientID string, includeDeleted bool) (*core.Record, error) {
+	collection, err := app.FindCollectionByNameOrId("products")
+	if err != nil {
+		return nil, err
+	}
+	var record *core.Record
+	if remoteID != "" {
+		record, err = app.FindRecordById(collection, remoteID)
+		if err == nil && record != nil {
+			if !includeDeleted && record.GetBool("deleted") {
+				return nil, errors.New("product not found")
+			}
+			return record, nil
+		}
+	}
+	if clientID != "" {
+		filter := "clientId={:clientId}"
+		args := dbx.Params{"clientId": clientID}
+		if !includeDeleted {
+			filter += " && deleted=false"
+		}
+		record, err = app.FindFirstRecordByFilter(collection, filter, args)
+		if err == nil && record != nil {
+			return record, nil
+		}
+	}
+	return nil, errors.New("product not found")
+}
+
+func productDTO(record *core.Record) ProductDTO {
+	return ProductDTO{
+		ID:            record.Id,
+		ClientID:      record.GetString("clientId"),
+		Name:          record.GetString("name"),
+		Price:         record.GetFloat("price"),
+		ServerVersion: record.GetInt("serverVersion"),
+		ChangedAt:     record.GetString("changedAt"),
+		CreatedAt:     record.GetString("createdAt"),
+		UpdatedAt:     record.GetString("changedAt"),
+		FieldValues: ProductFields{
+			Name:  record.GetString("name"),
+			Price: record.GetFloat("price"),
+		},
+	}
+}
+
+func baseFieldValueProduct(snapshot ProductFields, field string) (string, bool) {
+	switch field {
+	case "name":
+		return snapshot.Name, true
+	case "price":
+		return strconv.FormatFloat(snapshot.Price, 'f', -1, 64), true
+	default:
+		return "", false
+	}
+}
+
+func (s *SyncService) createProductConflict(app core.App, product *core.Record, req ProductPatchRequest, field, baseValue, localValue, remoteValue string) (*core.Record, error) {
+	col, err := app.FindCollectionByNameOrId("sync_conflicts")
+	if err != nil {
+		return nil, err
+	}
+	record := core.NewRecord(col)
+	record.Set("customerRef", "")
+	record.Set("clientId", req.ClientID)
+	record.Set("fieldName", field)
+	record.Set("baseValue", baseValue)
+	record.Set("localValue", localValue)
+	record.Set("remoteValue", remoteValue)
+	record.Set("deviceId", req.DeviceID)
+	record.Set("adminId", req.AdminID)
+	record.Set("adminUsername", req.AdminUsername)
+	record.Set("summary", fmt.Sprintf("conflict on %s for product %s", field, product.GetString("name")))
+	record.Set("status", "open")
+	record.Set("changedAt", time.Now().UTC().Format(time.RFC3339))
+	if err := app.Save(record); err != nil {
+		return nil, err
+	}
+	return record, nil
+}
+
+func toFloat(value any, fallback float64) float64 {
+	switch v := value.(type) {
+	case float64:
+		return v
+	case int:
+		return float64(v)
+	case string:
+		parsed, err := strconv.ParseFloat(strings.TrimSpace(v), 64)
+		if err == nil {
+			return parsed
+		}
+	}
+	return fallback
 }

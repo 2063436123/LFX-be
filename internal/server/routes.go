@@ -10,12 +10,36 @@ import (
 
 const syncAuthCollectionName = "users"
 
+// sanitizeError 过滤内部错误信息，防止泄露敏感信息
+func sanitizeError(err error) string {
+	if err == nil {
+		return ""
+	}
+	msg := err.Error()
+	// 只返回用户友好的错误消息，不暴露内部实现细节
+	if strings.Contains(msg, "sql") || strings.Contains(msg, "database") ||
+		strings.Contains(msg, "panic") || strings.Contains(msg, "runtime") {
+		return "internal error"
+	}
+	return msg
+}
+
 func (s *Server) registerRoutes(e *core.ServeEvent) {
 	publicGroup := e.Router.Group("/api/lfx-sync")
 	publicGroup.GET("/health", func(re *core.RequestEvent) error {
 		return re.JSON(http.StatusOK, map[string]any{"status": "ok"})
 	})
-	publicGroup.POST("/auth/login", s.handleAuthLogin)
+	
+	// 登录端点使用更严格的速率限制
+	loginLimiter := s.getAuthLoginLimiter()
+	publicGroup.POST("/auth/login", func(re *core.RequestEvent) error {
+		if err := s.RateLimitMiddleware(loginLimiter, func(e *core.RequestEvent) string {
+			return re.Request.RemoteAddr
+		})(re); err != nil {
+			return err
+		}
+		return s.handleAuthLogin(re)
+	})
 
 	authGroup := e.Router.Group("/api/lfx-sync")
 	authGroup.Bind(apis.RequireAuth(syncAuthCollectionName))
@@ -26,6 +50,9 @@ func (s *Server) registerRoutes(e *core.ServeEvent) {
 	authGroup.POST("/customers/create", s.handleCreateCustomer)
 	authGroup.POST("/customers/patch", s.handlePatchCustomer)
 	authGroup.POST("/customers/delete", s.handleDeleteCustomer)
+        authGroup.POST("/products/create", s.handleCreateProduct)
+        authGroup.POST("/products/patch", s.handlePatchProduct)
+        authGroup.POST("/products/delete", s.handleDeleteProduct)
 	authGroup.POST("/recharges/create", s.handleCreateRecharge)
 	authGroup.POST("/consumes/create", s.handleCreateConsume)
 	authGroup.POST("/logs/create", s.handleCreateLog)
@@ -35,7 +62,7 @@ func (s *Server) registerRoutes(e *core.ServeEvent) {
 func (s *Server) handlePull(e *core.RequestEvent) error {
 	res, err := s.service.PullChanges(e)
 	if err != nil {
-		return e.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return e.JSON(http.StatusBadRequest, map[string]string{"error": sanitizeError(err)})
 	}
 	return e.JSON(http.StatusOK, res)
 }
@@ -43,15 +70,33 @@ func (s *Server) handlePull(e *core.RequestEvent) error {
 func (s *Server) handleAuthLogin(e *core.RequestEvent) error {
 	var req AuthLoginRequest
 	if err := e.BindBody(&req); err != nil {
-		return e.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return e.JSON(http.StatusBadRequest, map[string]string{"error": "invalid request"})
 	}
+
+	// 统一认证错误响应，防止用户枚举
+	invalidCredentialsErr := e.JSON(http.StatusUnauthorized, map[string]string{"error": "invalid credentials"})
+
+	log.Printf("[DEBUG] Login attempt: identity=%s", req.Identity)
+
 	user, err := s.findUserByIdentity(req.Identity)
-	if err != nil || user == nil || !user.ValidatePassword(req.Password) {
-		return e.JSON(http.StatusUnauthorized, map[string]string{"error": "invalid credentials"})
+	if err != nil {
+		log.Printf("[DEBUG] findUserByIdentity error: %v", err)
+		return invalidCredentialsErr
 	}
+	if user == nil {
+		log.Printf("[DEBUG] findUserByIdentity returned nil user")
+		return invalidCredentialsErr
+	}
+	log.Printf("[DEBUG] User found: id=%s, username=%s", user.Id, user.GetString("username"))
+
+	if !user.ValidatePassword(req.Password) {
+		log.Printf("[DEBUG] Password validation failed")
+		return invalidCredentialsErr
+	}
+	log.Printf("[DEBUG] Password validation succeeded")
 	token, err := user.NewAuthToken()
 	if err != nil {
-		return e.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return e.JSON(http.StatusInternalServerError, map[string]string{"error": "internal error"})
 	}
 	return e.JSON(http.StatusOK, AuthSessionDTO{
 		Token: token,
@@ -66,7 +111,7 @@ func (s *Server) handleAuthMe(e *core.RequestEvent) error {
 func (s *Server) handleAuthRefresh(e *core.RequestEvent) error {
 	token, err := e.Auth.NewAuthToken()
 	if err != nil {
-		return e.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return e.JSON(http.StatusInternalServerError, map[string]string{"error": "internal error"})
 	}
 	return e.JSON(http.StatusOK, AuthSessionDTO{
 		Token: token,
@@ -77,7 +122,7 @@ func (s *Server) handleAuthRefresh(e *core.RequestEvent) error {
 func (s *Server) handleAuthLogout(e *core.RequestEvent) error {
 	e.Auth.RefreshTokenKey()
 	if err := e.App.Save(e.Auth); err != nil {
-		return e.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return e.JSON(http.StatusInternalServerError, map[string]string{"error": "internal error"})
 	}
 	return e.JSON(http.StatusOK, map[string]string{"status": "ok"})
 }
@@ -85,12 +130,12 @@ func (s *Server) handleAuthLogout(e *core.RequestEvent) error {
 func (s *Server) handleCreateCustomer(e *core.RequestEvent) error {
 	var req CustomerCreateRequest
 	if err := e.BindBody(&req); err != nil {
-		return e.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return e.JSON(http.StatusBadRequest, map[string]string{"error": "invalid request"})
 	}
 	s.applyActorFromAuth(e, &req.AdminID, &req.AdminUsername)
 	res, err := s.service.CreateCustomer(req)
 	if err != nil {
-		return e.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return e.JSON(http.StatusBadRequest, map[string]string{"error": sanitizeError(err)})
 	}
 	return e.JSON(http.StatusOK, res)
 }
@@ -98,12 +143,48 @@ func (s *Server) handleCreateCustomer(e *core.RequestEvent) error {
 func (s *Server) handlePatchCustomer(e *core.RequestEvent) error {
 	var req CustomerPatchRequest
 	if err := e.BindBody(&req); err != nil {
-		return e.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return e.JSON(http.StatusBadRequest, map[string]string{"error": "invalid request"})
 	}
 	s.applyActorFromAuth(e, &req.AdminID, &req.AdminUsername)
 	res, err := s.service.PatchCustomer(req)
 	if err != nil {
-		return e.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return e.JSON(http.StatusBadRequest, map[string]string{"error": sanitizeError(err)})
+	}
+	return e.JSON(http.StatusOK, res)
+}
+
+func (s *Server) handleCreateProduct(e *core.RequestEvent) error {
+	var req ProductCreateRequest
+	if err := e.BindBody(&req); err != nil {
+		return e.JSON(http.StatusBadRequest, map[string]string{"error": "invalid request"})
+	}
+	res, err := s.service.CreateProduct(req)
+	if err != nil {
+		return e.JSON(http.StatusBadRequest, map[string]string{"error": sanitizeError(err)})
+	}
+	return e.JSON(http.StatusOK, res)
+}
+
+func (s *Server) handlePatchProduct(e *core.RequestEvent) error {
+	var req ProductPatchRequest
+	if err := e.BindBody(&req); err != nil {
+		return e.JSON(http.StatusBadRequest, map[string]string{"error": "invalid request"})
+	}
+	res, err := s.service.PatchProduct(req)
+	if err != nil {
+		return e.JSON(http.StatusBadRequest, map[string]string{"error": sanitizeError(err)})
+	}
+	return e.JSON(http.StatusOK, res)
+}
+
+func (s *Server) handleDeleteProduct(e *core.RequestEvent) error {
+	var req ProductDeleteRequest
+	if err := e.BindBody(&req); err != nil {
+		return e.JSON(http.StatusBadRequest, map[string]string{"error": "invalid request"})
+	}
+	res, err := s.service.DeleteProduct(req)
+	if err != nil {
+		return e.JSON(http.StatusBadRequest, map[string]string{"error": sanitizeError(err)})
 	}
 	return e.JSON(http.StatusOK, res)
 }
@@ -111,12 +192,12 @@ func (s *Server) handlePatchCustomer(e *core.RequestEvent) error {
 func (s *Server) handleDeleteCustomer(e *core.RequestEvent) error {
 	var req CustomerDeleteRequest
 	if err := e.BindBody(&req); err != nil {
-		return e.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return e.JSON(http.StatusBadRequest, map[string]string{"error": "invalid request"})
 	}
 	s.applyActorFromAuth(e, &req.AdminID, &req.AdminUsername)
 	res, err := s.service.DeleteCustomer(req)
 	if err != nil {
-		return e.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return e.JSON(http.StatusBadRequest, map[string]string{"error": sanitizeError(err)})
 	}
 	return e.JSON(http.StatusOK, res)
 }
@@ -124,12 +205,12 @@ func (s *Server) handleDeleteCustomer(e *core.RequestEvent) error {
 func (s *Server) handleCreateRecharge(e *core.RequestEvent) error {
 	var req RechargeRequest
 	if err := e.BindBody(&req); err != nil {
-		return e.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return e.JSON(http.StatusBadRequest, map[string]string{"error": "invalid request"})
 	}
 	s.applyActorFromAuth(e, &req.AdminID, &req.AdminUsername)
 	res, err := s.service.CreateRecharge(req)
 	if err != nil {
-		return e.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return e.JSON(http.StatusBadRequest, map[string]string{"error": sanitizeError(err)})
 	}
 	return e.JSON(http.StatusOK, res)
 }
@@ -137,12 +218,12 @@ func (s *Server) handleCreateRecharge(e *core.RequestEvent) error {
 func (s *Server) handleCreateConsume(e *core.RequestEvent) error {
 	var req ConsumeRequest
 	if err := e.BindBody(&req); err != nil {
-		return e.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return e.JSON(http.StatusBadRequest, map[string]string{"error": "invalid request"})
 	}
 	s.applyActorFromAuth(e, &req.AdminID, &req.AdminUsername)
 	res, err := s.service.CreateConsume(req)
 	if err != nil {
-		return e.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return e.JSON(http.StatusBadRequest, map[string]string{"error": sanitizeError(err)})
 	}
 	return e.JSON(http.StatusOK, res)
 }
@@ -150,12 +231,12 @@ func (s *Server) handleCreateConsume(e *core.RequestEvent) error {
 func (s *Server) handleCreateLog(e *core.RequestEvent) error {
 	var req LogRequest
 	if err := e.BindBody(&req); err != nil {
-		return e.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return e.JSON(http.StatusBadRequest, map[string]string{"error": "invalid request"})
 	}
 	s.applyActorFromAuth(e, &req.AdminID, &req.AdminUsername)
 	res, err := s.service.CreateLog(req)
 	if err != nil {
-		return e.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return e.JSON(http.StatusBadRequest, map[string]string{"error": sanitizeError(err)})
 	}
 	return e.JSON(http.StatusOK, res)
 }
@@ -163,10 +244,10 @@ func (s *Server) handleCreateLog(e *core.RequestEvent) error {
 func (s *Server) handleResolveConflict(e *core.RequestEvent) error {
 	var req ResolveConflictRequest
 	if err := e.BindBody(&req); err != nil {
-		return e.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return e.JSON(http.StatusBadRequest, map[string]string{"error": "invalid request"})
 	}
 	if err := s.service.ResolveConflict(req); err != nil {
-		return e.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return e.JSON(http.StatusBadRequest, map[string]string{"error": sanitizeError(err)})
 	}
 	return e.JSON(http.StatusOK, map[string]string{"status": "ok"})
 }

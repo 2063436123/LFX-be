@@ -1,4 +1,8 @@
 package server
+import (
+	"errors"
+	"strings"
+)
 
 type CustomerFields struct {
 	Name      string `json:"name"`
@@ -59,7 +63,8 @@ type ConflictDTO struct {
 
 type PullResponse struct {
 	ServerTime string        `json:"serverTime"`
-	Customers  []CustomerDTO `json:"customers"`
+	Customers []CustomerDTO `json:"customers"`
+	Products  []ProductDTO   `json:"products"`
 	Recharges  []RecordDTO   `json:"recharges"`
 	Consumes   []RecordDTO   `json:"consumes"`
 	Logs       []RecordDTO   `json:"logs"`
@@ -153,10 +158,81 @@ type PushResult struct {
 	Status   string       `json:"status"`
 	Customer *CustomerDTO `json:"customer,omitempty"`
 	Conflict *ConflictDTO `json:"conflict,omitempty"`
+        Product  *ProductDTO  `json:"product,omitempty"`
 	Record   *RecordDTO   `json:"record,omitempty"`
 }
 
 type ResolveConflictRequest struct {
 	ConflictID string `json:"conflictId"`
 	Status     string `json:"status"`
+}
+
+// 允许的 Product 变更字段
+var allowedProductChangeFields = map[string]bool{
+	"name":  true,
+	"price": true,
+}
+
+// ValidateProductChangeField 验证 Product 变更字段是否允许
+func ValidateProductChangeField(field string) bool {
+	return allowedProductChangeFields[field]
+}
+
+type ProductFields struct {
+	Name  string  `json:"name"`
+	Price float64 `json:"price"`
+}
+
+// Validate 验证 Product 字段
+func (f ProductFields) Validate() error {
+	name := strings.TrimSpace(f.Name)
+	if name == "" {
+		return errors.New("name is required")
+	}
+	if len(name) > 100 {
+		return errors.New("name must be less than 100 characters")
+	}
+	if f.Price < 0 {
+		return errors.New("price must be non-negative")
+	}
+	return nil
+}
+
+type ProductDTO struct {
+	ID            string        `json:"id"`
+	ClientID      string        `json:"clientId"`
+	Name          string        `json:"name"`
+	Price         float64       `json:"price"`
+	ServerVersion int           `json:"serverVersion"`
+	ChangedAt     string        `json:"changedAt"`
+	CreatedAt     string        `json:"createdAt"`
+	UpdatedAt     string        `json:"updatedAt"`
+	FieldValues   ProductFields `json:"fieldValues"`
+}
+
+type ProductCreateRequest struct {
+	DeviceID      string        `json:"deviceId"`
+	AdminID       string        `json:"adminId"`
+	AdminUsername string        `json:"adminUsername"`
+	ClientID      string        `json:"clientId"`
+	Fields        ProductFields `json:"fields"`
+}
+
+type ProductPatchRequest struct {
+	DeviceID      string         `json:"deviceId"`
+	AdminID       string         `json:"adminId"`
+	AdminUsername string         `json:"adminUsername"`
+	ClientID      string         `json:"clientId"`
+	RemoteID      string         `json:"remoteId"`
+	BaseVersion   int            `json:"baseVersion"`
+	BaseSnapshot  ProductFields  `json:"baseSnapshot"`
+	Changes       map[string]any `json:"changes"`
+}
+
+type ProductDeleteRequest struct {
+	DeviceID      string `json:"deviceId"`
+	AdminID       string `json:"adminId"`
+	AdminUsername string `json:"adminUsername"`
+	ClientID      string `json:"clientId"`
+	RemoteID      string `json:"remoteId"`
 }
