@@ -146,6 +146,7 @@ func (s *SyncService) PatchCustomer(req CustomerPatchRequest) (*PushResult, erro
 		}
 
 		changedAny := false
+		// 第一阶段：检测所有冲突并创建冲突记录
 		for field, rawNew := range req.Changes {
 			baseValue, ok := baseFieldValue(req.BaseSnapshot, field)
 			if !ok {
@@ -163,16 +164,31 @@ func (s *SyncService) PatchCustomer(req CustomerPatchRequest) (*PushResult, erro
 				}
 				dto := conflictDTO(conflictRecord)
 				conflict = &dto
+				// 继续检查其他字段，不阻塞后续处理
+			}
+		}
+
+		// 第二阶段：只应用无冲突的变更
+		for field, rawNew := range req.Changes {
+			baseValue, ok := baseFieldValue(req.BaseSnapshot, field)
+			if !ok {
 				continue
 			}
-
-			switch field {
-			case "name", "gender", "phone", "remark":
-				current.Set(field, newValue)
-				changedAny = true
-			case "birthYear":
-				current.Set(field, toInt(rawNew, current.GetInt(field)))
-				changedAny = true
+			newValue := fmt.Sprintf("%v", rawNew)
+			currentValue := current.GetString(field)
+			if field == "birthYear" {
+				currentValue = strconv.Itoa(current.GetInt(field))
+			}
+			// 只有当没有冲突时才应用变更
+			if currentValue == baseValue || currentValue == newValue {
+				switch field {
+				case "name", "gender", "phone", "remark":
+					current.Set(field, newValue)
+					changedAny = true
+				case "birthYear":
+					current.Set(field, toInt(rawNew, current.GetInt(field)))
+					changedAny = true
+				}
 			}
 		}
 
@@ -692,7 +708,7 @@ func (s *SyncService) PatchProduct(req ProductPatchRequest) (*PushResult, error)
 			return err
 		}
 		changedAny := false
-		hasConflict := false
+		// 第一阶段：检测所有冲突并创建冲突记录
 		for field, rawNew := range req.Changes {
 			baseValue, ok := baseFieldValueProduct(req.BaseSnapshot, field)
 			if !ok {
@@ -712,19 +728,32 @@ func (s *SyncService) PatchProduct(req ProductPatchRequest) (*PushResult, error)
 				}
 				dto := conflictDTO(conflictRecord)
 				conflicts = append(conflicts, &dto)
-				hasConflict = true
+				// 继续检查其他字段，不阻塞后续处理
 			}
 		}
-		if hasConflict {
-			return nil
-		}
+
+		// 第二阶段：只应用无冲突的变更
 		for field, rawNew := range req.Changes {
-			if field == "name" {
-				current.Set(field, fmt.Sprintf("%v", rawNew))
-				changedAny = true
-			} else if field == "price" {
-				current.Set(field, toFloat(rawNew, current.GetFloat(field)))
-				changedAny = true
+			baseValue, ok := baseFieldValueProduct(req.BaseSnapshot, field)
+			if !ok {
+				continue
+			}
+			newValue := fmt.Sprintf("%v", rawNew)
+			var currentValue string
+			if field == "price" {
+				currentValue = strconv.FormatFloat(current.GetFloat(field), 'f', -1, 64)
+			} else {
+				currentValue = current.GetString(field)
+			}
+			// 只有当没有冲突时才应用变更
+			if currentValue == baseValue || currentValue == newValue {
+				if field == "name" {
+					current.Set(field, fmt.Sprintf("%v", rawNew))
+					changedAny = true
+				} else if field == "price" {
+					current.Set(field, toFloat(rawNew, current.GetFloat(field)))
+					changedAny = true
+				}
 			}
 		}
 		if changedAny {
