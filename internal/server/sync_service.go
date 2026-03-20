@@ -701,7 +701,7 @@ func (s *SyncService) PatchProduct(req ProductPatchRequest) (*PushResult, error)
 			return nil, fmt.Errorf("cannot modify field: %s", field)
 		}
 	}
-	var conflicts []*ConflictDTO
+	hasConflict := false
 	err = s.app.RunInTransaction(func(txApp core.App) error {
 		current, err := resolveProduct(txApp, req.RemoteID, req.ClientID, false)
 		if err != nil {
@@ -718,19 +718,14 @@ func (s *SyncService) PatchProduct(req ProductPatchRequest) (*PushResult, error)
 			var currentValue string
 			if field == "price" {
 				currentValue = strconv.FormatFloat(current.GetFloat(field), 'f', -1, 64)
-			} else {
-				currentValue = current.GetString(field)
-			}
-			if currentValue != baseValue && currentValue != newValue {
-				conflictRecord, err := s.createProductConflict(txApp, current, req, field, baseValue, newValue, currentValue)
-				if err != nil {
-					return err
+				} else {
+					currentValue = current.GetString(field)
 				}
-				dto := conflictDTO(conflictRecord)
-				conflicts = append(conflicts, &dto)
-				// 继续检查其他字段，不阻塞后续处理
+				if currentValue != baseValue && currentValue != newValue {
+					// 产品冲突采用 server-wins，避免客户端队列长期 blocked。
+					hasConflict = true
+				}
 			}
-		}
 
 		// 第二阶段：只应用无冲突的变更
 		for field, rawNew := range req.Changes {
@@ -773,8 +768,9 @@ func (s *SyncService) PatchProduct(req ProductPatchRequest) (*PushResult, error)
 		return nil, err
 	}
 	product := productDTO(record)
-	if len(conflicts) > 0 {
-		return &PushResult{Status: "conflict", Product: &product, Conflict: conflicts[0]}, nil
+	if hasConflict {
+		// 返回 ok，客户端会将冲突字段回落到服务器版本，避免无限重试。
+		return &PushResult{Status: "ok", Product: &product}, nil
 	}
 	return &PushResult{Status: "ok", Product: &product}, nil
 }
